@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Book Editor">
+<meta name="theme-color" content="#3b5bdb">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>Book Editor</title>
+<style>
+:root{--bg:#fff;--fg:#1b1b1f;--mut:#6b6b76;--line:#e3e3e8;--card:#f5f5f8;--acc:#3b5bdb}
+@media (prefers-color-scheme:dark){:root{--bg:#111114;--fg:#ececf1;--mut:#9a9aa6;--line:#2c2c33;--card:#1c1c22;--acc:#7c95ff}}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:17px -apple-system,system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:calc(env(safe-area-inset-top) + 8px) 12px 8px;display:flex;gap:8px;align-items:center}
+header h1{flex:1;font-size:18px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button,.btn{min-height:44px;min-width:44px;padding:0 14px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;cursor:pointer}
+button.pri,.btn.pri{background:var(--acc);color:#fff;border-color:var(--acc)}
+main{padding:12px 12px calc(env(safe-area-inset-bottom) + 24px);max-width:820px;margin:auto}
+.hidden{display:none!important}
+input[type=text]{width:100%;min-height:44px;font:inherit;padding:8px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+label{display:block;color:var(--mut);font-size:14px;margin:12px 0 4px}
+ul.ch{list-style:none;padding:0;margin:12px 0}
+ul.ch li{display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--line);padding:6px 0}
+ul.ch li .t{flex:1;min-height:44px;display:flex;align-items:center;cursor:pointer;overflow:hidden}
+ul.ch li .t span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ul.ch li button{padding:0;font-size:15px}
+.tools{position:sticky;top:calc(env(safe-area-inset-top) + 61px);z-index:4;background:var(--bg);display:flex;gap:6px;overflow-x:auto;padding:8px 0;border-bottom:1px solid var(--line)}
+.tools button{flex:none}
+#ed{min-height:60vh;outline:none;padding:12px 4px;font:19px/1.6 Georgia,serif;word-wrap:break-word}
+#ed img{max-width:100%;height:auto}
+.st{color:var(--mut);font-size:13px;text-align:center;margin:8px}
+.empty{text-align:center;padding:40px 10px}
+.empty p{color:var(--mut)}
+</style></head><body>
+<header><button id="back" class="hidden" aria-label="Back">‹ Back</button><h1 id="hd">Book Editor</h1><button id="exp" class="pri hidden">Export</button></header>
+<main>
+<section id="home" class="empty">
+  <h2>Edit your EPUB book</h2><p>Open an .epub from the Files app. Your edits save automatically on this phone.</p>
+  <label class="btn pri" style="display:inline-flex;align-items:center;color:#fff">Open EPUB…<input id="file" type="file" accept=".epub,application/epub+zip" hidden></label>
+  <p id="resume"></p>
+</section>
+<section id="book" class="hidden">
+  <label>Title</label><input id="title" type="text">
+  <label>Author</label><input id="author" type="text">
+  <ul class="ch" id="list"></ul>
+  <button id="add">+ Add chapter</button>
+  <label class="btn" style="display:inline-flex;align-items:center;margin-left:6px">Open another…<input id="file2" type="file" accept=".epub,application/epub+zip" hidden></label>
+  <div id="dl" class="st"></div>
+</section>
+<section id="edit" class="hidden">
+  <div class="tools">
+    <button data-c="bold"><b>B</b></button><button data-c="italic"><i>I</i></button>
+    <button data-b="h1">H1</button><button data-b="h2">H2</button><button data-b="p">¶</button>
+    <button data-c="undo">↶</button><button data-c="redo">↷</button><button id="ren">Rename</button>
+  </div>
+  <div id="ed" contenteditable="true" spellcheck="true"></div>
+</section>
+<div id="status" class="st"></div>
+</main>
+<script src="jszip.min.js"></script>
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const XHTML='http://www.w3.org/1999/xhtml';
+let book=null,cur=-1,saveT=null,blobURLs={};
+// ---------- IndexedDB ----------
+const db=new Promise((res,rej)=>{const r=indexedDB.open('book-editor',1);r.onupgradeneeded=()=>r.result.createObjectStore('kv');r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+async function idb(op,k,v){const d=await db;return new Promise((res,rej)=>{const t=d.transaction('kv',op==='get'?'readonly':'readwrite');const s=t.objectStore('kv');const r=op==='get'?s.get(k):s.put(v,k);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+function status(m){$('#status').textContent=m}
+function save(){clearTimeout(saveT);saveT=setTimeout(saveNow,600)}
+async function saveNow(){clearTimeout(saveT);if(!book)return;if(cur>=0)flushEditor();try{await idb('put','book',book);status('Saved '+new Date().toLocaleTimeString())}catch(e){status('Save failed: '+e.message)}}
+// ---------- path helpers ----------
+function dirOf(p){const i=p.lastIndexOf('/');return i<0?'':p.slice(0,i+1)}
+function resolve(base,rel){rel=decodeURIComponent(rel.split('#')[0]);const parts=(dirOf(base)+rel).split('/');const out=[];for(const x of parts){if(x==='..')out.pop();else if(x!=='.')out.push(x)}return out.join('/')}
+function relTo(fromFile,toPath){const a=dirOf(fromFile).split('/').filter(Boolean),b=toPath.split('/');let i=0;while(i<a.length&&i<b.length-1&&a[i]===b[i])i++;return '../'.repeat(a.length-i)+b.slice(i).join('/')}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+const parseXML=s=>new DOMParser().parseFromString(s,'application/xml');
+// ---------- import ----------
+async function importEpub(file){
+  status('Opening…');
+  const zip=await JSZip.loadAsync(file);
+  if(zip.file('META-INF/encryption.xml')){const enc=await zip.file('META-INF/encryption.xml').async('string');if(/EncryptedData/.test(enc)&&!/obfuscation/i.test(enc))throw new Error('This EPUB is DRM-protected and cannot be edited.')}
+  const cont=parseXML(await zip.file('META-INF/container.xml').async('string'));
+  const opfPath=cont.getElementsByTagName('rootfile')[0].getAttribute('full-path');
+  const opf=parseXML(await zip.file(opfPath).async('string'));
+  const g=(n)=>{const e=opf.getElementsByTagNameNS('*',n)[0];return e?e.textContent.trim():''};
+  const pkg=opf.documentElement;const uidId=pkg.getAttribute('unique-identifier');
+  let ident='';for(const e of opf.getElementsByTagNameNS('*','identifier'))if(!ident||e.getAttribute('id')===uidId)ident=e.textContent.trim();
+  const items={};for(const it of opf.getElementsByTagNameNS('*','item'))items[it.getAttribute('id')]={id:it.getAttribute('id'),href:resolve(opfPath,it.getAttribute('href')),type:it.getAttribute('media-type'),props:it.getAttribute('properties')||''};
+  let coverId='';for(const m of opf.getElementsByTagNameNS('*','meta'))if(m.getAttribute('name')==='cover')coverId=m.getAttribute('content');
+  for(const k in items)if(items[k].props.includes('cover-image'))coverId=k;
+  const spineEl=opf.getElementsByTagNameNS('*','spine')[0];const ncxId=spineEl.getAttribute('toc');
+  const navItem=Object.values(items).find(i=>i.props.includes('nav'));
+  // titles from nav/ncx
+  const titles={};
+  if(navItem&&zip.file(navItem.href)){const nd=parseXML(await zip.file(navItem.href).async('string'));for(const a of nd.getElementsByTagNameNS('*','a')){const h=a.getAttribute('href');if(h){const p=resolve(navItem.href,h);if(!titles[p])titles[p]=a.textContent.trim()}}}
+  else if(ncxId&&items[ncxId]&&zip.file(items[ncxId].href)){const nd=parseXML(await zip.file(items[ncxId].href).async('string'));for(const np of nd.getElementsByTagNameNS('*','navPoint')){const c=np.getElementsByTagNameNS('*','content')[0];const t=np.getElementsByTagNameNS('*','text')[0];if(c&&t){const p=resolve(items[ncxId].href,c.getAttribute('src'));if(!titles[p])titles[p]=t.textContent.trim()}}}
+  const chapters=[],used=new Set();let navSpineIndex=-1;
+  for(const ir of spineEl.getElementsByTagNameNS('*','itemref')){
+    const it=items[ir.getAttribute('idref')];if(!it||!zip.file(it.href))continue;used.add(it.id);if(navItem&&it.id===navItem.id){navSpineIndex=chapters.length;continue}
+    const src=await zip.file(it.href).async('string');
+    let doc=parseXML(src);if(doc.getElementsByTagName('parsererror').length)doc=new DOMParser().parseFromString(src,'text/html');
+    const body=doc.getElementsByTagName('body')[0];const head=doc.getElementsByTagName('head')[0];
+    const links=[...(head?head.getElementsByTagName('link'):[])].filter(l=>/stylesheet/i.test(l.getAttribute('rel')||'')).map(l=>resolve(it.href,l.getAttribute('href')));
+    const ser=new XMLSerializer();let html='';for(const n of body.childNodes)html+=ser.serializeToString(n);
+    html=html.replace(/ xmlns="http:\/\/www\.w3\.org\/1999\/xhtml"/g,'');
+    const h=body.querySelector('h1,h2,h3');const dt=doc.getElementsByTagName('title')[0];
+    chapters.push({id:it.id,href:it.href,title:titles[it.href]||(h&&h.textContent.trim())||(dt&&dt.textContent.trim())||it.href.split('/').pop(),html,css:links,bodyClass:body.getAttribute('class')||'',linear:ir.getAttribute('linear')!=='no',props:it.props.replace(/\bnav\b/,'').trim()});
+  }
+  const resources={};
+  for(const it of Object.values(items)){if(used.has(it.id)&&!it.props.includes('nav'))continue;if(it.id===ncxId||(navItem&&it.id===navItem.id))continue;const f=zip.file(it.href);if(!f)continue;resources[it.href]={type:it.type,props:it.props.includes('cover-image')||it.id===coverId?'cover-image':'',data:await f.async('uint8array')}}
+  book={opfDir:dirOf(opfPath),title:g('title')||'Untitled',author:g('creator'),lang:g('language')||'en',ident:ident||('urn:uuid:'+crypto.randomUUID()),chapters,resources,navSpineIndex,fileName:file.name||'book.epub'};
+  await saveNow();showBook();status('Opened “'+book.title+'” – '+chapters.length+' sections');
+}
+// ---------- views ----------
+function view(v){for(const s of['home','book','edit'])$('#'+s).classList.toggle('hidden',s!==v);$('#back').classList.toggle('hidden',v==='home'||v==='book');$('#exp').classList.toggle('hidden',v==='home');scrollTo(0,0)}
+function showBook(){if(cur>=0)flushEditor();cur=-1;view('book');$('#hd').textContent=book.title;$('#title').value=book.title;$('#author').value=book.author;renderList()}
+function renderList(){const ul=$('#list');ul.innerHTML='';book.chapters.forEach((c,i)=>{const li=document.createElement('li');li.innerHTML=`<div class="t"><span>${esc(c.title)}</span></div><button aria-label="Move up">↑</button><button aria-label="Move down">↓</button><button aria-label="Delete">🗑</button>`;const[b1,b2,b3]=li.querySelectorAll('button');li.querySelector('.t').onclick=()=>openCh(i);b1.onclick=()=>mv(i,-1);b2.onclick=()=>mv(i,1);b3.onclick=()=>{if(confirm('Delete “'+c.title+'”?')){book.chapters.splice(i,1);if(book.navSpineIndex>i)book.navSpineIndex--;renderList();save()}};ul.appendChild(li)})}
+function mv(i,d){const j=i+d;if(j<0||j>=book.chapters.length)return;const a=book.chapters;[a[i],a[j]]=[a[j],a[i]];renderList();save()}
+function resURL(path){if(blobURLs[path])return blobURLs[path];const r=book.resources[path];if(!r)return null;return blobURLs[path]=URL.createObjectURL(new Blob([r.data],{type:r.type}))}
+function openCh(i){cur=i;const c=book.chapters[i];view('edit');$('#hd').textContent=c.title;const ed=$('#ed');ed.innerHTML=c.html;
+  for(const el of ed.querySelectorAll('img[src],image')){const at=el.tagName.toLowerCase()==='image'?(el.getAttribute('href')!==null?'href':'xlink:href'):'src';const v=el.getAttribute(at);if(!v||/^(data|https?):/.test(v))continue;const u=resURL(resolve(c.href,v));if(u){el.setAttribute('data-orig',v);el.setAttribute(at,u)}}}
+function flushEditor(){if(cur<0)return;const ed=$('#ed').cloneNode(true);for(const el of ed.querySelectorAll('[data-orig]')){const at=el.tagName.toLowerCase()==='image'?(el.getAttribute('href')!==null?'href':'xlink:href'):'src';el.setAttribute(at,el.getAttribute('data-orig'));el.removeAttribute('data-orig')}book.chapters[cur].html=ed.innerHTML}
+$('#ed').addEventListener('input',save);
+document.querySelectorAll('[data-c]').forEach(b=>b.addEventListener('mousedown',e=>e.preventDefault()));
+document.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>{document.execCommand(b.dataset.c);save()});
+document.querySelectorAll('[data-b]').forEach(b=>{b.addEventListener('mousedown',e=>e.preventDefault());b.onclick=()=>{document.execCommand('formatBlock',false,b.dataset.b);save()}});
+$('#ren').onclick=()=>{const c=book.chapters[cur];const t=prompt('Chapter title',c.title);if(t){c.title=t.trim();$('#hd').textContent=c.title;save()}};
+$('#back').onclick=()=>{saveNow();showBook()};
+$('#title').oninput=e=>{book.title=e.target.value;$('#hd').textContent=book.title;save()};
+$('#author').oninput=e=>{book.author=e.target.value;save()};
+$('#add').onclick=()=>{const t=prompt('New chapter title','New Chapter');if(!t)return;let n=1;while(book.chapters.some(c=>c.href===book.opfDir+'text/new-'+n+'.xhtml'))n++;const css=Object.keys(book.resources).filter(k=>book.resources[k].type==='text/css');book.chapters.push({id:'new'+n+'_'+Date.now(),href:book.opfDir+'text/new-'+n+'.xhtml',title:t,html:'<h1>'+esc(t)+'</h1><p>Start writing…</p>',css,bodyClass:'',linear:true,props:''});renderList();save();openCh(book.chapters.length-1)};
+async function onFile(e){const f=e.target.files[0];e.target.value='';if(!f)return;if(book&&!confirm('Replace the book currently in the editor? Export it first if you want to keep your changes.'))return;blobURLs={};try{await importEpub(f)}catch(err){status('Could not open: '+err.message);alert('Could not open this file: '+err.message)}}
+$('#file').onchange=onFile;$('#file2').onchange=onFile;
+// ---------- export ----------
+function toXHTMLBody(html){const d=document.implementation.createHTMLDocument('');d.body.innerHTML=html;for(const s of d.body.querySelectorAll('script'))s.remove();let out='';const ser=new XMLSerializer();for(const n of d.body.childNodes)out+=ser.serializeToString(n);return out.replace(/ xmlns="http:\/\/www\.w3\.org\/1999\/xhtml"/g,'')}
+function chapterDoc(c){const links=c.css.filter(p=>book.resources[p]).map(p=>`<link rel="stylesheet" type="text/css" href="${esc(relTo(c.href,p))}"/>`).join('');
+  const s=`<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${esc(book.lang)}" lang="${esc(book.lang)}"><head><meta charset="UTF-8"/><title>${esc(c.title)}</title>${links}</head><body${c.bodyClass?` class="${esc(c.bodyClass)}"`:''}>${toXHTMLBody(c.html)}</body></html>`;
+  if(parseXML(s).getElementsByTagName('parsererror').length)throw new Error('Chapter “'+c.title+'” is not well-formed');return s}
+async function buildEpub(){
+  flushEditor();const z=new JSZip();z.file('mimetype','application/epub+zip',{compression:'STORE'});
+  const opfPath=book.opfDir+'content.opf';
+  z.file('META-INF/container.xml','<?xml version="1.0" encoding="UTF-8"?>\n<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="'+esc(opfPath)+'" media-type="application/oebps-package+xml"/></rootfiles></container>');
+  let navPath=book.opfDir+'nav.xhtml',ncxPath=book.opfDir+'toc.ncx';
+  const taken=new Set([...Object.keys(book.resources),...book.chapters.map(c=>c.href)]);
+  while(taken.has(navPath))navPath=navPath.replace('.xhtml','1.xhtml');while(taken.has(ncxPath))ncxPath=ncxPath.replace('.ncx','1.ncx');
+  const man=[],spine=[];const ids=new Set();const uid=b=>{let id=b.replace(/[^A-Za-z0-9_.-]/g,'_');if(!/^[A-Za-z_]/.test(id))id='i'+id;let x=id,n=1;while(ids.has(x))x=id+'_'+n++;ids.add(x);return x};
+  const rel=p=>esc(relTo(opfPath,p));
+  for(const[p,r]of Object.entries(book.resources)){z.file(p,r.data);man.push(`<item id="${uid('r_'+p.split('/').pop())}" href="${rel(p)}" media-type="${esc(r.type)}"${r.props?` properties="${r.props}"`:''}/>`)}
+  for(const c of book.chapters){const s=chapterDoc(c);z.file(c.href,s);const id=uid(c.id);const pr=[c.props];if(/<svg/i.test(c.html))pr.push('svg');if(/<script/i.test(c.html))pr.push('scripted');const p=[...new Set(pr.join(' ').split(/\s+/).filter(Boolean).filter(x=>x!=='scripted'))].join(' ');man.push(`<item id="${id}" href="${rel(c.href)}" media-type="application/xhtml+xml"${p?` properties="${p}"`:''}/>`);spine.push(`<itemref idref="${id}"${c.linear?'':' linear="no"'}/>`)}
+  man.push(`<item id="nav" href="${rel(navPath)}" media-type="application/xhtml+xml" properties="nav"/>`,`<item id="ncx" href="${rel(ncxPath)}" media-type="application/x-dtbncx+xml"/>`);
+  const toc=book.chapters.filter(c=>c.linear);if(book.navSpineIndex>=0)spine.splice(Math.min(book.navSpineIndex,spine.length),0,'<itemref idref="nav"/>');
+  z.file(navPath,`<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="${esc(book.lang)}" lang="${esc(book.lang)}"><head><meta charset="UTF-8"/><title>Contents</title></head><body><nav epub:type="toc" id="toc"><h1>Contents</h1><ol>${toc.map(c=>`<li><a href="${esc(relTo(navPath,c.href))}">${esc(c.title)}</a></li>`).join('')}</ol></nav></body></html>`);
+  z.file(ncxPath,`<?xml version="1.0" encoding="UTF-8"?>\n<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="${esc(book.ident)}"/><meta name="dtb:depth" content="1"/><meta name="dtb:totalPageCount" content="0"/><meta name="dtb:maxPageNumber" content="0"/></head><docTitle><text>${esc(book.title)}</text></docTitle><navMap>${toc.map((c,i)=>`<navPoint id="np${i+1}" playOrder="${i+1}"><navLabel><text>${esc(c.title)}</text></navLabel><content src="${esc(relTo(ncxPath,c.href))}"/></navPoint>`).join('')}</navMap></ncx>`);
+  const cover=Object.entries(book.resources).find(([,r])=>r.props==='cover-image');const coverMeta=cover?`<meta name="cover" content="${man.find(m=>m.includes('cover-image')).match(/id="([^"]+)"/)[1]}"/>`:'';
+  const mod=new Date().toISOString().replace(/\.\d+Z$/,'Z');
+  z.file(opfPath,`<?xml version="1.0" encoding="UTF-8"?>\n<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="${esc(book.lang)}"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="bookid">${esc(book.ident)}</dc:identifier><dc:title>${esc(book.title)}</dc:title>${book.author?`<dc:creator>${esc(book.author)}</dc:creator>`:''}<dc:language>${esc(book.lang)}</dc:language><meta property="dcterms:modified">${mod}</meta>${coverMeta}</metadata><manifest>${man.join('')}</manifest><spine toc="ncx">${spine.join('')}</spine></package>`);
+  return z.generateAsync({type:'blob',mimeType:'application/epub+zip',compression:'DEFLATE'});
+}
+$('#exp').onclick=async()=>{try{await saveNow();status('Building EPUB…');const blob=await buildEpub();const name=(book.title.replace(/[^\w\- ]+/g,'').trim()||'book')+'.epub';const file=new File([blob],name,{type:'application/epub+zip'});window.__lastExport=blob;
+  const url=URL.createObjectURL(blob);$('#dl').innerHTML=`<a class="btn" style="display:inline-flex;align-items:center" href="${url}" download="${esc(name)}">Download ${esc(name)}</a>`;
+  if(navigator.canShare&&navigator.canShare({files:[file]})){try{await navigator.share({files:[file],title:book.title});status('Shared')}catch(e){status('Share cancelled – use the Download link')}}else{if(cur>=0)showBook();status('Ready – tap Download')}}catch(e){status('Export failed: '+e.message);alert('Export failed: '+e.message)}};
+// ---------- start ----------
+(async()=>{try{book=await idb('get','book');if(book){showBook();status('Restored your saved work')}}catch(e){status('Storage unavailable: '+e.message)}
+  if('serviceWorker'in navigator&&location.protocol!=='file:')navigator.serviceWorker.register('sw.js').catch(()=>{});
+  if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+})();
+document.addEventListener('visibilitychange',()=>{if(document.hidden)saveNow()});
+</script></body></html>
